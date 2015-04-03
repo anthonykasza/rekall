@@ -36,6 +36,7 @@ import socket
 from rekall import scan
 from rekall import utils
 from rekall import obj
+from rekall.plugins.investigate import investigate
 from rekall.plugins.windows import common
 
 # pylint: disable=protected-access
@@ -118,11 +119,21 @@ class WinDNSCache(common.WindowsCommandPlugin):
         parser.add_argument("--index", default=True, type="Boolean",
                             help="Should we use the index")
 
-    def __init__(self, hashtable=None, index=True, **kwargs):
+        parser.add_argument("--investigate", default=False, type="Boolean",
+                            help="Query OpenDNS's Investigate for domain name status")
+
+    def __init__(self, hashtable=None, index=True, investigate=False, **kwargs):
         super(WinDNSCache, self).__init__(**kwargs)
         self.profile = InitializedDNSTypes(self.profile)
         self.hashtable = hashtable
         self.index = index
+        self.investigate = investigate
+
+        # the render function depends on if Investigate is to be queried
+        if self.investigate:
+            self.render = self._render_investigate
+        else:
+            self.render = self._render
 
     def _find_svchost_vad(self):
         """Returns the vad and _EPROCESS of the dnsrslvr.dll."""
@@ -313,7 +324,7 @@ class WinDNSCache(common.WindowsCommandPlugin):
 
         return self._locate_heap(task, vad)
 
-    def render(self, renderer):
+    def _render(self, renderer):
         self.cc = self.session.plugins.cc()
         with self.cc:
             cache_hash_table = self.locate_cache_hashtable()
@@ -337,3 +348,33 @@ class WinDNSCache(common.WindowsCommandPlugin):
                                 record,
                                 record.Type,
                                 record.Data, depth=1)
+								
+    def _render_investigate(self, renderer):
+        self.cc = self.session.plugins.cc()
+        with self.cc:
+            cache_hash_table = self.locate_cache_hashtable()
+            if cache_hash_table:
+                renderer.table_header([
+                    dict(name="Name", type="TreeNode", width=45),
+                    ("Investigate Status", "status", "18"),
+                    ("Record", "record", "[addrpad]"),
+                    ("Type", "type", "16"),
+                    ("Data", "data", ""),
+                ])
+
+                for bucket in cache_hash_table:
+                    for entry in bucket.walk_list("Next", True):
+                        name = entry.Name.deref()
+                        status = investigate.check_name(name.v())
+                        renderer.table_row(
+                            name, status, entry, "HTABLE", depth=0)
+                        for record in entry.Record.walk_list("Next", True):
+                            name = record.Name.deref() or name
+                            renderer.table_row(
+                                name,
+                                status,
+                                record,
+                                record.Type,
+                                record.Data, depth=1)
+								
+    
